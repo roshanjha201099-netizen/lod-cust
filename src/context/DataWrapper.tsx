@@ -2,70 +2,64 @@ import {
   createContext,
   type ReactNode,
   useContext,
-  useEffect,
   useState,
 } from 'react'
-
-type UserProfile = {
-  email: string
-  fullName?: string
-  mobile?: string
-  streetAddress?: string
-  area?: string
-  city?: string
-  state?: string
-  pincode?: string
-}
-
-type RequirementInput = {
-  title: string
-  description: string
-  imageName?: string
-  audioName?: string
-  videoName?: string
-}
-
-type RequirementRecord = RequirementInput & {
-  id: string
-  createdAt: string
-}
+import { postJson } from '../lib/api'
+import type {
+  RequirementRecord,
+  ServiceProvider,
+  UserProfile,
+  WalletState,
+} from '../types/lod'
 
 type DataContextValue = {
   isLoggedIn: boolean
   currentUser: UserProfile | null
   requirements: RequirementRecord[]
-  signIn: (profile: UserProfile) => void
-  signUp: (profile: UserProfile) => void
+  matchedProviders: ServiceProvider[]
+  wallet: WalletState
+  signIn: (input: { email: string; password: string }) => Promise<UserProfile>
+  signUp: (input: UserProfile & { password: string }) => Promise<UserProfile>
   signOut: () => void
-  addRequirement: (input: RequirementInput) => void
+  addRequirement: (input: {
+    service: string
+    requirement: string
+    pincode: string
+    userEmail?: string
+  }) => Promise<{ requirement: RequirementRecord; providers: ServiceProvider[] }>
 }
 
 const DataContext = createContext<DataContextValue | null>(null)
 
 const AUTH_STORAGE_KEY = 'lod-auth'
 const REQUIREMENTS_STORAGE_KEY = 'lod-requirements'
-const DEMO_USER: UserProfile = {
-  fullName: 'Demo Customer',
-  mobile: '9876543210',
-  email: 'demo@lod.in',
-  streetAddress: '221B Demo Street',
-  area: 'Indiranagar',
-  city: 'Bengaluru',
-  state: 'Karnataka',
-  pincode: '560038',
+const MATCHED_PROVIDERS_STORAGE_KEY = 'lod-matched-providers'
+const WALLET_STORAGE_KEY = 'lod-wallet'
+const SIGNUP_BONUS = 5
+const DEFAULT_WALLET: WalletState = {
+  balance: SIGNUP_BONUS,
+  transactions: [
+    {
+      id: 'welcome-bonus',
+      type: 'credit',
+      amount: SIGNUP_BONUS,
+      note: 'Welcome bonus added to your wallet.',
+      createdAt: new Date().toISOString(),
+    },
+  ],
 }
 
 function readStoredAuth() {
   const raw = window.localStorage.getItem(AUTH_STORAGE_KEY)
 
   if (!raw) {
-    return DEMO_USER
+    return null
   }
 
   try {
     return JSON.parse(raw) as UserProfile
   } catch {
-    return DEMO_USER
+    return null
   }
 }
 
@@ -83,14 +77,64 @@ function readStoredRequirements() {
   }
 }
 
-export function DataWrapper({ children }: { children: ReactNode }) {
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null)
-  const [requirements, setRequirements] = useState<RequirementRecord[]>([])
+function readStoredWallet() {
+  const raw = window.localStorage.getItem(WALLET_STORAGE_KEY)
 
-  useEffect(() => {
-    setCurrentUser(readStoredAuth())
-    setRequirements(readStoredRequirements())
-  }, [])
+  if (!raw) {
+    return DEFAULT_WALLET
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as WalletState
+
+    if (
+      typeof parsed?.balance === 'number' &&
+      Array.isArray(parsed.transactions)
+    ) {
+      return parsed
+    }
+  } catch {
+    return DEFAULT_WALLET
+  }
+
+  return DEFAULT_WALLET
+}
+
+function readStoredMatchedProviders() {
+  const raw = window.localStorage.getItem(MATCHED_PROVIDERS_STORAGE_KEY)
+
+  if (!raw) {
+    return []
+  }
+
+  try {
+    return JSON.parse(raw) as ServiceProvider[]
+  } catch {
+    return []
+  }
+}
+export const DEMO_USER: UserProfile = {
+  email: 'demo@lod.in',
+  fullName: 'Demo Customer',
+  mobile: '9876543210',
+  streetAddress: '221B Demo Street',
+  area: 'Indiranagar',
+  city: 'Bengaluru',
+  state: 'Karnataka',
+  pincode: '560038',
+}
+
+export function DataWrapper({ children }: { children: ReactNode }) {
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() =>
+    readStoredAuth(),
+  )
+  const [requirements, setRequirements] = useState<RequirementRecord[]>(() =>
+    readStoredRequirements(),
+  )
+  const [matchedProviders, setMatchedProviders] = useState<ServiceProvider[]>(() =>
+    readStoredMatchedProviders(),
+  )
+  const [wallet, setWallet] = useState<WalletState>(() => readStoredWallet())
 
   const persistAuth = (profile: UserProfile | null) => {
     setCurrentUser(profile)
@@ -111,27 +155,79 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     )
   }
 
+  const persistWallet = (nextWallet: WalletState) => {
+    setWallet(nextWallet)
+    window.localStorage.setItem(WALLET_STORAGE_KEY, JSON.stringify(nextWallet))
+  }
+
+  const persistMatchedProviders = (nextProviders: ServiceProvider[]) => {
+    setMatchedProviders(nextProviders)
+    window.localStorage.setItem(
+      MATCHED_PROVIDERS_STORAGE_KEY,
+      JSON.stringify(nextProviders),
+    )
+  }
+
   const value: DataContextValue = {
     isLoggedIn: currentUser !== null,
     currentUser,
     requirements,
-    signIn: (profile) => {
-      persistAuth(profile)
+    matchedProviders,
+    wallet,
+    signIn: async ({ email, password }) => {
+      const data = await postJson<{ user: UserProfile }>('/api/signin', {
+        email,
+        password,
+      })
+      persistAuth(data.user)
+      return data.user
     },
-    signUp: (profile) => {
-      persistAuth(profile)
+    signUp: async (profile) => {
+      const data = await postJson<{ user: UserProfile }>('/api/signup', profile)
+      persistAuth(data.user)
+      persistWallet({
+        balance: SIGNUP_BONUS,
+        transactions: [
+          {
+            id: crypto.randomUUID(),
+            type: 'credit',
+            amount: SIGNUP_BONUS,
+            note: 'Signup bonus credited to your wallet.',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      })
+      return data.user
     },
     signOut: () => {
       persistAuth(null)
+      persistMatchedProviders([])
     },
-    addRequirement: (input) => {
+    addRequirement: async (input) => {
+      const data = await postJson<{
+        requirement: {
+          id: string
+          service: string
+          requirement: string
+          pincode: string
+          createdAt: string
+        }
+        providers: ServiceProvider[]
+      }>('/api/post-requirement', input)
+
       const nextRequirement: RequirementRecord = {
-        ...input,
-        id: crypto.randomUUID(),
-        createdAt: new Date().toISOString(),
+        id: data.requirement.id,
+        createdAt: data.requirement.createdAt,
+        title: `${data.requirement.service || 'Custom requirement'} requirement`,
+        description: `${data.requirement.requirement || 'Requirement posted'} | Pincode: ${data.requirement.pincode}`,
       }
 
       persistRequirements([nextRequirement, ...requirements])
+      persistMatchedProviders(data.providers)
+      return {
+        requirement: nextRequirement,
+        providers: data.providers,
+      }
     },
   }
 
