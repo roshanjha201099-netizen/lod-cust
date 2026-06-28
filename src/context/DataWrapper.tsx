@@ -2,9 +2,10 @@ import {
   createContext,
   type ReactNode,
   useContext,
+  useEffect,
   useState,
 } from 'react'
-import { postJson } from '../lib/api'
+import { postJson, saveToken, getToken, clearToken } from '../lib/api'
 import type {
   RequirementSearchContext,
   RequirementRecord,
@@ -197,6 +198,78 @@ export const DEMO_USER: UserProfile = {
   walletBalance: SIGNUP_BONUS,
 }
 
+// Convert a backend requirement doc into the frontend RequirementRecord shape
+function toRequirementRecord(doc: {
+  id: string
+  service?: string
+  requirement?: string
+  pincode?: string
+  createdAt: string
+}): RequirementRecord {
+  return {
+    id: doc.id,
+    createdAt: doc.createdAt,
+    title: `${doc.service || 'Custom requirement'} requirement`,
+    description: `${doc.requirement || 'Requirement posted'} | Pincode: ${doc.pincode || 'N/A'}`,
+  }
+}
+
+// Fetch search history from MongoDB via backend
+async function fetchSearchHistory(email: string): Promise<RequirementRecord[]> {
+  try {
+    const data = await postJson<{
+      searchHistory: Array<{
+        id: string
+        service?: string
+        requirement?: string
+        pincode?: string
+        createdAt: string
+      }>
+    }>('/api/get-search-history', { email })
+
+    return (data.searchHistory || []).map(toRequirementRecord)
+  } catch {
+    // If backend is unreachable or token is invalid, return empty
+    return []
+  }
+}
+
+// Convert a backend requirement doc into the frontend RequirementRecord shape
+function toRequirementRecord(doc: {
+  id: string
+  service?: string
+  requirement?: string
+  pincode?: string
+  createdAt: string
+}): RequirementRecord {
+  return {
+    id: doc.id,
+    createdAt: doc.createdAt,
+    title: `${doc.service || 'Custom requirement'} requirement`,
+    description: `${doc.requirement || 'Requirement posted'} | Pincode: ${doc.pincode || 'N/A'}`,
+  }
+}
+
+// Fetch search history from MongoDB via backend
+async function fetchSearchHistory(email: string): Promise<RequirementRecord[]> {
+  try {
+    const data = await postJson<{
+      searchHistory: Array<{
+        id: string
+        service?: string
+        requirement?: string
+        pincode?: string
+        createdAt: string
+      }>
+    }>('/api/get-search-history', { email })
+
+    return (data.searchHistory || []).map(toRequirementRecord)
+  } catch {
+    // If backend is unreachable or token is invalid, return empty
+    return []
+  }
+}
+
 export function DataWrapper({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() =>
     readStoredAuth(),
@@ -208,11 +281,21 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     readStoredMatchedProviders(),
   )
   const [wallet, setWallet] = useState<WalletState>(() => readStoredWallet())
-  const [unlockedProviderIds, setUnlockedProviderIds] = useState<string[]>(() =>
-    readStoredUnlockedProviderIds(),
-  )
-  const [lastRequirementSearch, setLastRequirementSearch] =
-    useState<RequirementSearchContext | null>(() => readLastRequirementSearch())
+
+  // On mount: if we have a stored user + token, fetch their search history from MongoDB
+  useEffect(() => {
+    const storedUser = readStoredAuth()
+    const token = getToken()
+
+    if (storedUser && token) {
+      fetchSearchHistory(storedUser.email).then((history) => {
+        if (history.length > 0) {
+          persistRequirements(history)
+        }
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const persistAuth = (profile: UserProfile | null) => {
     setCurrentUser(profile)
@@ -277,16 +360,32 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     unlockedProviderIds,
     lastRequirementSearch,
     signIn: async ({ email, password }) => {
-      const data = await postJson<{ user: UserProfile }>('/api/signin', {
+      const data = await postJson<{ user: UserProfile; token: string }>('/api/signin', {
         email,
         password,
       })
+
+      // Save JWT token for session management
+      if (data.token) {
+        saveToken(data.token)
+      }
+
       persistAuth(data.user)
-      persistWallet(buildWalletStateFromUser(data.user, wallet))
+
+      // Fetch search history from MongoDB after login
+      const history = await fetchSearchHistory(email)
+      persistRequirements(history)
+
       return data.user
     },
     signUp: async (profile) => {
-      const data = await postJson<{ user: UserProfile }>('/api/signup', profile)
+      const data = await postJson<{ user: UserProfile; token: string }>('/api/signup', profile)
+
+      // Save JWT token for session management
+      if (data.token) {
+        saveToken(data.token)
+      }
+
       persistAuth(data.user)
       persistWallet({
         balance: SIGNUP_BONUS,
@@ -300,13 +399,20 @@ export function DataWrapper({ children }: { children: ReactNode }) {
           },
         ],
       })
+      // New user — start with empty search history
+      persistRequirements([])
       return data.user
     },
     signOut: () => {
+      // Call backend logout to blacklist the token (fire-and-forget)
+      postJson('/api/logout', {}).catch(() => {
+        // Ignore errors — clear local state regardless
+      })
+
+      clearToken()
       persistAuth(null)
+      persistRequirements([])
       persistMatchedProviders([])
-      persistUnlockedProviderIds([])
-      persistLastRequirementSearch(null)
     },
     addRequirement: async (input) => {
       const data = await postJson<{
