@@ -56,6 +56,26 @@ export function AuthPage({ mode }: AuthPageProps) {
       pincode: String(formData.get('pincode') || ''),
     }
 
+    // Client-side validation
+    const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+    if (!emailRegex.test(profile.email)) {
+      setAuthError('Please enter a valid email address.')
+      return
+    }
+
+    if (password.length < 6) {
+      setAuthError('Password must be at least 6 characters.')
+      return
+    }
+
+    if (isSignUp) {
+      const mobileRegex = /^\d{10}$/
+      if (!mobileRegex.test(profile.mobile)) {
+        setAuthError('Please enter a valid 10-digit mobile number.')
+        return
+      }
+    }
+
     try {
       if (isSignUp) {
         const confirmPassword = String(formData.get('confirmPassword') || '')
