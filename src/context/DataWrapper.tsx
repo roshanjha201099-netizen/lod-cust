@@ -6,9 +6,11 @@ import {
 } from 'react'
 import { postJson } from '../lib/api'
 import type {
+  RequirementSearchContext,
   RequirementRecord,
   ServiceProvider,
   UserProfile,
+  WalletSpendEntry,
   WalletState,
 } from '../types/lod'
 
@@ -18,6 +20,8 @@ type DataContextValue = {
   requirements: RequirementRecord[]
   matchedProviders: ServiceProvider[]
   wallet: WalletState
+  unlockedProviderIds: string[]
+  lastRequirementSearch: RequirementSearchContext | null
   signIn: (input: { email: string; password: string }) => Promise<UserProfile>
   signUp: (input: UserProfile & { password: string }) => Promise<UserProfile>
   signOut: () => void
@@ -27,6 +31,9 @@ type DataContextValue = {
     pincode: string
     userEmail?: string
   }) => Promise<{ requirement: RequirementRecord; providers: ServiceProvider[] }>
+  unlockProviderPhone: (input: {
+    provider: ServiceProvider
+  }) => Promise<void>
 }
 
 const DataContext = createContext<DataContextValue | null>(null)
@@ -35,6 +42,8 @@ const AUTH_STORAGE_KEY = 'lod-auth'
 const REQUIREMENTS_STORAGE_KEY = 'lod-requirements'
 const MATCHED_PROVIDERS_STORAGE_KEY = 'lod-matched-providers'
 const WALLET_STORAGE_KEY = 'lod-wallet'
+const UNLOCKED_PROVIDER_IDS_STORAGE_KEY = 'lod-unlocked-provider-ids'
+const LAST_REQUIREMENT_SEARCH_STORAGE_KEY = 'lod-last-requirement-search'
 const SIGNUP_BONUS = 5
 const DEFAULT_WALLET: WalletState = {
   balance: SIGNUP_BONUS,
@@ -113,6 +122,69 @@ function readStoredMatchedProviders() {
     return []
   }
 }
+
+function readStoredUnlockedProviderIds() {
+  const raw = window.localStorage.getItem(UNLOCKED_PROVIDER_IDS_STORAGE_KEY)
+
+  if (!raw) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as string[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function readLastRequirementSearch() {
+  const raw = window.localStorage.getItem(LAST_REQUIREMENT_SEARCH_STORAGE_KEY)
+
+  if (!raw) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as RequirementSearchContext
+    if (typeof parsed?.service === 'string' && typeof parsed?.pincode === 'string') {
+      return parsed
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+function mapWalletSpendEntryToTransaction(entry: WalletSpendEntry) {
+  return {
+    id: entry.id,
+    type: 'debit' as const,
+    amount: entry.amount,
+    note: `Unlocked ${entry.providerName || entry.unlockedPhone} for ${entry.service}.`,
+    createdAt: entry.createdAt,
+  }
+}
+
+function buildWalletStateFromUser(user: UserProfile | null, fallback: WalletState) {
+  if (!user) {
+    return fallback
+  }
+
+  const backendTransactions = Array.isArray(user.walletSpentHistory)
+    ? user.walletSpentHistory.map(mapWalletSpendEntryToTransaction)
+    : []
+
+  if (typeof user.walletBalance !== 'number' && backendTransactions.length === 0) {
+    return fallback
+  }
+
+  return {
+    balance: typeof user.walletBalance === 'number' ? user.walletBalance : fallback.balance,
+    transactions: backendTransactions.length > 0 ? backendTransactions.reverse() : fallback.transactions,
+  }
+}
 export const DEMO_USER: UserProfile = {
   email: 'demo@lod.in',
   fullName: 'Demo Customer',
@@ -122,6 +194,7 @@ export const DEMO_USER: UserProfile = {
   city: 'Bengaluru',
   state: 'Karnataka',
   pincode: '560038',
+  walletBalance: SIGNUP_BONUS,
 }
 
 export function DataWrapper({ children }: { children: ReactNode }) {
@@ -135,6 +208,11 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     readStoredMatchedProviders(),
   )
   const [wallet, setWallet] = useState<WalletState>(() => readStoredWallet())
+  const [unlockedProviderIds, setUnlockedProviderIds] = useState<string[]>(() =>
+    readStoredUnlockedProviderIds(),
+  )
+  const [lastRequirementSearch, setLastRequirementSearch] =
+    useState<RequirementSearchContext | null>(() => readLastRequirementSearch())
 
   const persistAuth = (profile: UserProfile | null) => {
     setCurrentUser(profile)
@@ -168,18 +246,43 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     )
   }
 
+  const persistUnlockedProviderIds = (nextUnlockedProviderIds: string[]) => {
+    setUnlockedProviderIds(nextUnlockedProviderIds)
+    window.localStorage.setItem(
+      UNLOCKED_PROVIDER_IDS_STORAGE_KEY,
+      JSON.stringify(nextUnlockedProviderIds),
+    )
+  }
+
+  const persistLastRequirementSearch = (search: RequirementSearchContext | null) => {
+    setLastRequirementSearch(search)
+
+    if (search) {
+      window.localStorage.setItem(
+        LAST_REQUIREMENT_SEARCH_STORAGE_KEY,
+        JSON.stringify(search),
+      )
+      return
+    }
+
+    window.localStorage.removeItem(LAST_REQUIREMENT_SEARCH_STORAGE_KEY)
+  }
+
   const value: DataContextValue = {
     isLoggedIn: currentUser !== null,
     currentUser,
     requirements,
     matchedProviders,
     wallet,
+    unlockedProviderIds,
+    lastRequirementSearch,
     signIn: async ({ email, password }) => {
       const data = await postJson<{ user: UserProfile }>('/api/signin', {
         email,
         password,
       })
       persistAuth(data.user)
+      persistWallet(buildWalletStateFromUser(data.user, wallet))
       return data.user
     },
     signUp: async (profile) => {
@@ -202,6 +305,8 @@ export function DataWrapper({ children }: { children: ReactNode }) {
     signOut: () => {
       persistAuth(null)
       persistMatchedProviders([])
+      persistUnlockedProviderIds([])
+      persistLastRequirementSearch(null)
     },
     addRequirement: async (input) => {
       const data = await postJson<{
@@ -224,9 +329,45 @@ export function DataWrapper({ children }: { children: ReactNode }) {
 
       persistRequirements([nextRequirement, ...requirements])
       persistMatchedProviders(data.providers)
+      persistUnlockedProviderIds([])
+      persistLastRequirementSearch({
+        service: data.requirement.service || input.service,
+        pincode: data.requirement.pincode,
+      })
       return {
         requirement: nextRequirement,
         providers: data.providers,
+      }
+    },
+    unlockProviderPhone: async ({ provider }) => {
+      if (!currentUser?.email) {
+        throw new Error('Please sign in to unlock provider phone numbers.')
+      }
+
+      const service = lastRequirementSearch?.service || provider.service
+      const searchedPincode = lastRequirementSearch?.pincode || provider.location
+
+      const data = await postJson<{
+        walletBalance: number
+        spentCredit: WalletSpendEntry
+        user: UserProfile
+      }>('/api/spent-credit', {
+        email: currentUser.email,
+        service,
+        providerId: provider.id,
+        unlockedPhone: provider.phone,
+        providerName: provider.name,
+        searchedPincode,
+      })
+
+      persistAuth(data.user)
+      persistWallet(buildWalletStateFromUser(data.user, {
+        balance: data.walletBalance,
+        transactions: [mapWalletSpendEntryToTransaction(data.spentCredit), ...wallet.transactions],
+      }))
+
+      if (!unlockedProviderIds.includes(provider.id)) {
+        persistUnlockedProviderIds([...unlockedProviderIds, provider.id])
       }
     },
   }

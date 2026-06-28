@@ -7,6 +7,8 @@ export type UserProfile = {
   city?: string
   state?: string
   pincode?: string
+  walletBalance?: number
+  walletSpentHistory?: WalletSpendEntry[]
 }
 
 export type RequirementInput = {
@@ -43,4 +45,20 @@ export type WalletTransaction = {
 export type WalletState = {
   balance: number
   transactions: WalletTransaction[]
+}
+
+export type WalletSpendEntry = {
+  id: string
+  service: string
+  amount: number
+  unlockedPhone: string
+  providerId?: string
+  providerName?: string
+  searchedPincode?: string
+  createdAt: string
+}
+
+export type RequirementSearchContext = {
+  service: string
+  pincode: string
 }

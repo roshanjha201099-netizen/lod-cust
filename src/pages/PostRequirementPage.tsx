@@ -132,21 +132,7 @@ export function PostRequirementPage() {
             </div>
           </section>
 
-          <div className="post-or-mark" aria-hidden="true">
-            or
-          </div>
-
-          <section className="post-input-panel">
-            <label className="post-field">
-              <span>Enter your service requirement</span>
-              <textarea
-                className="post-textarea"
-                value={requirementText}
-                onChange={(event) => setRequirementText(event.target.value)}
-                placeholder="Explain the work needed, timing, address details, and any urgent notes."
-              />
-            </label>
-          </section>
+         
 
           <div className="post-actions-row">
             <label className="post-field post-pincode-field">
